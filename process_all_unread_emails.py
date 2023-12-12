@@ -6,6 +6,7 @@ from google.auth.transport.requests import Request
 from openai import OpenAI
 import os
 from google.oauth2.credentials import Credentials
+from presidio_analyzer import AnalyzerEngine
 
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
@@ -45,6 +46,7 @@ def fetch_emails(gmail: Resource, page_token: Optional[str]) -> Tuple[List[Dict[
         results = gmail.users().messages().list(
             userId='me',
             labelIds=['UNREAD'],
+            q = 'is:unread category:primary', # query the unread from the primary one
             pageToken=page_token  # Include the page token in the request if there is one
         ).execute()
     except Exception as e:
@@ -157,7 +159,9 @@ def evaluate_email(email_data: Dict[str, Union[str, List[str]]], user_first_name
             f"Body: {truncated_body}"
         )
     }
-    # check for the PII and not send to OpenAI
+    #TODO check for the PII and not send to OpenAI
+
+    #TODO (is:unread category:primary)
 
 
 
