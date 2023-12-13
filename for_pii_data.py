@@ -6,6 +6,7 @@ from google.auth.transport.requests import Request
 from openai import OpenAI
 import os
 from google.oauth2.credentials import Credentials
+from presidio_analyzer import AnalyzerEngine
 
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
@@ -35,6 +36,9 @@ def get_openai_client():
     # Make sure that OPENAI_API_KEY is set in your environment
     return OpenAI()
 
+def get_analyzer():
+    return AnalyzerEngine()
+
 def get_user_name():
     user_first_name = input("Enter your first name: ")
     user_last_name = input("Enter your last name: ")
@@ -44,7 +48,8 @@ def fetch_emails(gmail: Resource, page_token: Optional[str]) -> Tuple[List[Dict[
     try:
         results = gmail.users().messages().list(
             userId='me',
-            q="{category:primary OR category:updates OR category:forums} is:unread",  # filter by category
+            labelIds=['UNREAD'],
+            q = 'is:unread', # query the unread emails
             pageToken=page_token  # Include the page token in the request if there is one
         ).execute()
     except Exception as e:
@@ -100,7 +105,9 @@ def parse_email_data(gmail: Resource, message_info: Dict[str, Union[str, List[st
     }
     return email_data_parsed
 
-def evaluate_email(email_data: Dict[str, Union[str, List[str]]], user_first_name: str, user_last_name: str, client: OpenAI) -> bool:
+
+
+def evaluate_email(email_data: Dict[str, Union[str, List[str]]], user_first_name: str, user_last_name: str, client: OpenAI, pii_analyzer : AnalyzerEngine) -> bool:
     MAX_EMAIL_LEN = 3000
     system_message: Dict[str, str] = {
         "role": "system",
@@ -146,6 +153,8 @@ def evaluate_email(email_data: Dict[str, Union[str, List[str]]], user_first_name
         )
     }
     truncated_body = email_data['body'][:MAX_EMAIL_LEN] + ("..." if len(email_data['body']) > MAX_EMAIL_LEN else "")
+
+
     user_message: Dict[str, str] = {
         "role": "user",
         "content": (
@@ -158,10 +167,15 @@ def evaluate_email(email_data: Dict[str, Union[str, List[str]]], user_first_name
         )
     }
 
-
-
     # Send the messages to GPT-4, TODO add retry logic
     try:
+        # Analyze the PII data
+        analysis_results = pii_analyzer.analyze(text=truncated_body, language='en')
+        has_pii = len(analysis_results) > 0
+        if has_pii: # Only evaluate emails when there is no PII
+            print(f"This email contains PII data")
+            return False
+
         completion = client.chat.completions.create(
             model="gpt-3.5-turbo", # switch to gpt-3.5-turbo for faster/ cheaper results (might be slightly less accurate)
             messages=[system_message, user_message],
@@ -175,9 +189,9 @@ def evaluate_email(email_data: Dict[str, Union[str, List[str]]], user_first_name
     # Extract and return the response
     return completion.choices[0].message.content.strip() == "True"
 
-def process_email(gmail: Resource, message_info: Dict[str, Union[str, List[str]]], email_data_parsed: Dict[str, Union[str, List[str]]], user_first_name: str, user_last_name: str, client: OpenAI) -> int:
+def process_email(gmail: Resource, message_info: Dict[str, Union[str, List[str]]], email_data_parsed: Dict[str, Union[str, List[str]]], user_first_name: str, user_last_name: str, client: OpenAI, pii_anaylzer: AnalyzerEngine ) -> int:
     # Evaluate email
-    if evaluate_email(email_data_parsed, user_first_name, user_last_name, client):
+    if evaluate_email(email_data_parsed, user_first_name, user_last_name, client, pii_anaylzer):
         print("Email is not worth the time, marking as read")
         # Remove UNREAD label
         try:
@@ -191,7 +205,7 @@ def process_email(gmail: Resource, message_info: Dict[str, Union[str, List[str]]
         except Exception as e:
             print(f"Failed to mark email as read: {e}")
     else:
-        print("Email is worth the time, leaving as unread")
+        print("Email is worth the time or contains PII data, leaving as unread")
     return 0
 
 def report_statistics(total_unread_emails: int, total_pages_fetched: int, total_marked_as_read: int) -> None:
@@ -204,6 +218,7 @@ def main():
     gmail = get_gmail_service()
     client = get_openai_client()
     user_first_name, user_last_name = get_user_name()
+    pii_analyzer= get_analyzer()
 
     page_token: Optional[str] = None
 
@@ -223,7 +238,7 @@ def main():
             email_data_parsed = parse_email_data(gmail, message_info)
 
             # Process email
-            assisted_emails += process_email(gmail, message_info, email_data_parsed, user_first_name, user_last_name, client)
+            assisted_emails += process_email(gmail, message_info, email_data_parsed, user_first_name, user_last_name, client, pii_analyzer)
 
         if not page_token:
             break  # Exit the loop if there are no more pages of messages
