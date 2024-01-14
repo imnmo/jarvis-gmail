@@ -44,7 +44,8 @@ def fetch_emails(gmail: Resource, page_token: Optional[str]) -> Tuple[List[Dict[
     try:
         results = gmail.users().messages().list(
             userId='me',
-            q="{category:primary OR category:updates OR category:forums} is:unread",  # filter by category
+            labelIds=['UNREAD'],
+            q="{category:primary} is:unread",  # filter by primary
             pageToken=page_token  # Include the page token in the request if there is one
         ).execute()
     except Exception as e:
@@ -102,6 +103,8 @@ def parse_email_data(gmail: Resource, message_info: Dict[str, Union[str, List[st
 
 def evaluate_email(email_data: Dict[str, Union[str, List[str]]], user_first_name: str, user_last_name: str, client: OpenAI) -> bool:
     MAX_EMAIL_LEN = 3000
+    user_first_name = user_first_name.strip()
+    user_last_name = user_last_name.strip()
     system_message: Dict[str, str] = {
         "role": "system",
         "content": (
@@ -145,7 +148,8 @@ def evaluate_email(email_data: Dict[str, Union[str, List[str]]], user_first_name
             "\"True\" or \"False\""
         )
     }
-    truncated_body = email_data['body'][:MAX_EMAIL_LEN] + ("..." if len(email_data['body']) > MAX_EMAIL_LEN else "")
+    truncated_body = (email_data['body'][:MAX_EMAIL_LEN] + ("..." if len(email_data['body']) > MAX_EMAIL_LEN else "")) if 'body' in email_data else ""
+
     user_message: Dict[str, str] = {
         "role": "user",
         "content": (
@@ -176,8 +180,14 @@ def evaluate_email(email_data: Dict[str, Union[str, List[str]]], user_first_name
     return completion.choices[0].message.content.strip() == "True"
 
 def process_email(gmail: Resource, message_info: Dict[str, Union[str, List[str]]], email_data_parsed: Dict[str, Union[str, List[str]]], user_first_name: str, user_last_name: str, client: OpenAI) -> int:
+    try:
+        should_mark_as_read = evaluate_email(email_data_parsed, user_first_name, user_last_name, client)
+    except Exception as e:
+        print(f"Failed to evaluate email: {e}")
+        return 0
+
     # Evaluate email
-    if evaluate_email(email_data_parsed, user_first_name, user_last_name, client):
+    if should_mark_as_read:
         print("Email is not worth the time, marking as read")
         # Remove UNREAD label
         try:
@@ -207,28 +217,28 @@ def main():
 
     page_token: Optional[str] = None
 
-    unread_emails = 0
-    pages_fetched = 0
-    assisted_emails = 0
+    total_unread_emails = 0
+    total_pages_fetched = 0
+    total_marked_as_read = 0
 
     while True:  # Continue looping until no more pages of messages
         # Fetch unread emails
         messages, page_token = fetch_emails(gmail, page_token)
-        pages_fetched += 1
-        print(f"Fetched page {pages_fetched} of emails")
+        total_pages_fetched += 1
+        print(f"Fetched page {total_pages_fetched} of emails")
 
-        unread_emails += len(messages)
+        total_unread_emails += len(messages)
         for message_info in messages: # TODO process emails on a single page in parallel
             # Fetch and parse email data
             email_data_parsed = parse_email_data(gmail, message_info)
 
             # Process email
-            assisted_emails += process_email(gmail, message_info, email_data_parsed, user_first_name, user_last_name, client)
+            total_marked_as_read += process_email(gmail, message_info, email_data_parsed, user_first_name, user_last_name, client)
 
         if not page_token:
             break  # Exit the loop if there are no more pages of messages
 
-    report_statistics(unread_emails, pages_fetched, assisted_emails)
+    report_statistics(total_unread_emails, total_pages_fetched, total_marked_as_read)
 
 if __name__ == "__main__":
     main()
